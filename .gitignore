@@ -1,0 +1,6 @@
+outputs/
+*__pycache__*
+
+seqlab-env/
+venv/
+.venv/
