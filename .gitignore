@@ -4,3 +4,4 @@ outputs/
 seqlab-env/
 venv/
 .venv/
+tests/
