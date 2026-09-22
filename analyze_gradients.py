@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.lstm_cell import LSTMCellManual
+from models.gru_cell import GRUCellManual
 from models.numpy_rnn import VanillaRNN
 
 
@@ -91,6 +92,38 @@ def measure_lstm_gradients(seq_len, input_size=10, hidden_size=32,
     return np.asarray(h_gradient_norms), np.asarray(c_gradient_norms)
 
 
+def measure_gru_gradients(seq_len, input_size=10, hidden_size=32,
+                          output_size=10, seed=0):
+    torch.manual_seed(seed)
+
+    token_ids = torch.randint(0, input_size, (seq_len,))
+    xs = F.one_hot(token_ids, num_classes=input_size).float()
+
+    cell = GRUCellManual(input_size, hidden_size)
+    output_layer = nn.Linear(hidden_size, output_size)
+
+    h = torch.zeros(1, hidden_size)
+
+    h_gradient_norms = [0.0] * seq_len
+
+    def save_norm(storage, timestep):
+        def hook(gradient):
+            storage[timestep] = gradient.norm().item()
+        return hook
+
+    for t in range(seq_len):
+        h, _ = cell(xs[t].unsqueeze(0), h)
+
+        h.register_hook(save_norm(h_gradient_norms, t))
+
+    target = torch.randint(0, output_size, (1,))
+    final_logits = output_layer(h)
+    loss = F.cross_entropy(final_logits, target)
+    loss.backward()
+
+    return np.asarray(h_gradient_norms)
+
+
 def average_over_seeds(measurement_function, seq_len, seeds):
     """Reduce the chance that one lucky/unlucky initialization dominates."""
     measurements = [measurement_function(seq_len, seed=seed) for seed in seeds]
@@ -109,10 +142,12 @@ def plot_gradient_comparison(seq_len=40, seeds=range(5),
     lstm_h, lstm_c = average_over_seeds(
         measure_lstm_gradients, seq_len, seeds
     )
+    gru_h = average_over_seeds(measure_gru_gradients, seq_len, seeds)
 
     rnn = normalize_to_loss_position(rnn)
     lstm_h = normalize_to_loss_position(lstm_h)
     lstm_c = normalize_to_loss_position(lstm_c)
+    gru_h = normalize_to_loss_position(gru_h)
 
     # Reverse the arrays as well as the x-axis. The plotted line now runs from
     # the loss position (distance 0) toward earlier timesteps.
@@ -122,6 +157,7 @@ def plot_gradient_comparison(seq_len=40, seeds=range(5),
     plt.plot(distance, rnn[::-1], label="Vanilla RNN: relative ||dL/dh_t||")
     plt.plot(distance, lstm_h[::-1], label="LSTM: relative ||dL/dh_t||")
     plt.plot(distance, lstm_c[::-1], label="LSTM: relative ||dL/dc_t||")
+    plt.plot(distance, gru_h[::-1], label="GRU: relative ||dL/dh_t||")
 
     plt.yscale("log")
     plt.xlabel("Steps before the final loss position")
