@@ -137,7 +137,7 @@ def average_over_seeds(measurement_function, seq_len, seeds):
 
 
 def plot_gradient_comparison(seq_len=40, seeds=range(5),
-                             save_path="outputs/rnn_vs_lstm_gradients.png"):
+                             save_path="outputs/graphs/rnn_vs_lstm_gradients.png"):
     rnn = average_over_seeds(measure_rnn_gradients, seq_len, seeds)
     lstm_h, lstm_c = average_over_seeds(
         measure_lstm_gradients, seq_len, seeds

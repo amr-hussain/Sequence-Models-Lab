@@ -15,7 +15,7 @@ from data.shakespeare import ShakespeareCharDataset
 from models.sequence_models import TransformerLM
 
 
-def plot_attention_heatmap(attn_weights, tokens, layer=0, head=0, save_path="outputs/attention_heatmap.png"):
+def plot_attention_heatmap(attn_weights, tokens, layer=0, head=0, save_path="outputs/graphs/attention_heatmap.png"):
     """
     attn_weights: (batch, num_heads, seq_len, seq_len) for one layer
     tokens: list of str, length seq_len -- the actual characters, for axis labels
