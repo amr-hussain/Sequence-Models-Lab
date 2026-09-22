@@ -1,309 +1,140 @@
 """
-Compare gradient propagation through time for:
+Measure how a loss at the final timestep sends gradients backward through:
+    1. a manual NumPy vanilla RNN
+    2. a manual PyTorch LSTM
 
-1. Vanilla RNN (manual NumPy BPTT)
-2. Manual LSTM (PyTorch autograd)
+The plotted values are normalized by the gradient at the loss position. This
+focuses the comparison on how much gradient survives as distance increases,
+not on unrelated differences in output-layer scale.
 
 Run:
-
     python analyze_gradients.py
 """
 
 import os
-import numpy as np
-import matplotlib.pyplot as plt
 
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.numpy_rnn import VanillaRNN
 from models.lstm_cell import LSTMCellManual
+from models.numpy_rnn import VanillaRNN
 
 
-# ============================================================
-# VANILLA RNN
-# ============================================================
+def normalize_to_loss_position(norms):
+    """At the final timestep, relative gradient is 1.0."""
+    norms = np.asarray(norms, dtype=np.float64)
+    return norms / (norms[-1] + 1e-30)
 
-def measure_rnn_grad_norms_vs_timestep(
-    seq_len,
-    input_size=10,
-    hidden_size=32,
-    output_size=10,
-    seed=0,
-):
+
+def measure_rnn_gradients(seq_len, input_size=10, hidden_size=32,
+                          output_size=10, seed=0):
     rng = np.random.default_rng(seed)
-
-    model = VanillaRNN(
-        input_size=input_size,
-        hidden_size=hidden_size,
-        output_size=output_size,
-        seed=seed,
-    )
+    model = VanillaRNN(input_size, hidden_size, output_size, seed=seed)
 
     xs = []
-
     for _ in range(seq_len):
-        x = np.zeros(input_size)
-        x[rng.integers(input_size)] = 1.0
-        xs.append(x)
+        x_t = np.zeros(input_size)
+        x_t[rng.integers(input_size)] = 1.0
+        xs.append(x_t)
 
-    ys_target = [None] * (seq_len - 1)
-    ys_target.append(rng.integers(output_size))
+    # Only the final output contributes directly to the loss.
+    targets = [None] * (seq_len - 1) + [rng.integers(output_size)]
 
-    ys, ps, hs = model.forward(xs)
-
-    _, grad_norms = model.backward(
-        xs,
-        ys_target,
-        ps,
-        hs,
+    _, probabilities, hidden_states = model.forward(xs)
+    _, gradient_norms = model.backward(
+        xs, targets, probabilities, hidden_states
     )
+    return np.asarray(gradient_norms)
 
-    return np.array(grad_norms)
 
-
-# ============================================================
-# LSTM
-# ============================================================
-
-def measure_lstm_grad_norms_vs_timestep(
-    seq_len,
-    vocab_size=10,
-    embed_size=16,
-    hidden_size=32,
-    seed=0,
-):
+def measure_lstm_gradients(seq_len, input_size=10, hidden_size=32,
+                           output_size=10, seed=0):
     torch.manual_seed(seed)
 
-    embed = nn.Embedding(vocab_size, embed_size)
-    cell = LSTMCellManual(embed_size, hidden_size)
-    out = nn.Linear(hidden_size, vocab_size)
+    # Inputs are one-hot vectors, matching the NumPy RNN experiment. There is
+    # deliberately no embedding layer here because we are testing recurrence.
+    token_ids = torch.randint(0, input_size, (seq_len,))
+    xs = F.one_hot(token_ids, num_classes=input_size).float()
 
-    x = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(1, seq_len),
-    )
-
-    target = torch.randint(
-        low=0,
-        high=vocab_size,
-        size=(1,),
-    )
-
-    embedded = embed(x)
+    cell = LSTMCellManual(input_size, hidden_size)
+    output_layer = nn.Linear(hidden_size, output_size)
 
     h = torch.zeros(1, hidden_size)
     c = torch.zeros(1, hidden_size)
 
-    hs = []
-    cs = []
+    h_gradient_norms = [0.0] * seq_len
+    c_gradient_norms = [0.0] * seq_len
+
+    def save_norm(storage, timestep):
+        # register_hook calls this function during backward and supplies the
+        # gradient with respect to the tensor on which the hook was registered.
+        def hook(gradient):
+            storage[timestep] = gradient.norm().item()
+        return hook
 
     for t in range(seq_len):
+        h, c, _ = cell(xs[t].unsqueeze(0), (h, c))
 
-        h, c, _ = cell(
-            embedded[:, t, :],
-            (h, c),
-        )
+        # h and c are tensors, not layers. They accept register_hook because
+        # PyTorch recorded how autograd produced them.
+        h.register_hook(save_norm(h_gradient_norms, t))
+        c.register_hook(save_norm(c_gradient_norms, t))
 
-        h.retain_grad()
-        c.retain_grad()
-
-        hs.append(h)
-        cs.append(c)
-
-    logits = out(h)
-
-    loss = F.cross_entropy(logits, target)
-
+    target = torch.randint(0, output_size, (1,))
+    final_logits = output_layer(h)
+    loss = F.cross_entropy(final_logits, target)
     loss.backward()
 
-    h_norms = []
-    c_norms = []
+    return np.asarray(h_gradient_norms), np.asarray(c_gradient_norms)
 
-    for h_t, c_t in zip(hs, cs):
 
-        if h_t.grad is None:
-            h_norms.append(0.0)
-        else:
-            h_norms.append(
-                h_t.grad.norm().item()
-            )
+def average_over_seeds(measurement_function, seq_len, seeds):
+    """Reduce the chance that one lucky/unlucky initialization dominates."""
+    measurements = [measurement_function(seq_len, seed=seed) for seed in seeds]
 
-        if c_t.grad is None:
-            c_norms.append(0.0)
-        else:
-            c_norms.append(
-                c_t.grad.norm().item()
-            )
+    if isinstance(measurements[0], tuple):
+        first = np.mean([m[0] for m in measurements], axis=0)
+        second = np.mean([m[1] for m in measurements], axis=0)
+        return first, second
 
-    return (
-        np.array(h_norms),
-        np.array(c_norms),
+    return np.mean(measurements, axis=0)
+
+
+def plot_gradient_comparison(seq_len=40, seeds=range(5),
+                             save_path="outputs/rnn_vs_lstm_gradients.png"):
+    rnn = average_over_seeds(measure_rnn_gradients, seq_len, seeds)
+    lstm_h, lstm_c = average_over_seeds(
+        measure_lstm_gradients, seq_len, seeds
     )
 
+    rnn = normalize_to_loss_position(rnn)
+    lstm_h = normalize_to_loss_position(lstm_h)
+    lstm_c = normalize_to_loss_position(lstm_c)
 
-# ============================================================
-# PLOT
-# ============================================================
-
-def plot_gradient_comparison(
-    seq_len=40,
-    save_path="outputs/rnn_vs_lstm_gradients.png",
-):
-    rnn_norms = measure_rnn_grad_norms_vs_timestep(
-        seq_len=seq_len
-    )
-
-    lstm_h_norms, lstm_c_norms = (
-        measure_lstm_grad_norms_vs_timestep(
-            seq_len=seq_len
-        )
-    )
-
-    timesteps = np.arange(seq_len)
-
-    steps_before_end = (
-        seq_len - 1 - timesteps
-    )
+    # Reverse the arrays as well as the x-axis. The plotted line now runs from
+    # the loss position (distance 0) toward earlier timesteps.
+    distance = np.arange(seq_len)
 
     plt.figure(figsize=(10, 6))
-
-    plt.plot(
-        steps_before_end,
-        rnn_norms,
-        linewidth=2,
-        label="Vanilla RNN: ||dL/dh_t||",
-    )
-
-    plt.plot(
-        steps_before_end,
-        lstm_h_norms,
-        linewidth=2,
-        label="LSTM: ||dL/dh_t||",
-    )
-
-    plt.plot(
-        steps_before_end,
-        lstm_c_norms,
-        linewidth=2,
-        label="LSTM: ||dL/dc_t||",
-    )
-
-    plt.xlabel(
-        "Timesteps before loss position"
-    )
-
-    plt.ylabel(
-        "Gradient Norm"
-    )
+    plt.plot(distance, rnn[::-1], label="Vanilla RNN: relative ||dL/dh_t||")
+    plt.plot(distance, lstm_h[::-1], label="LSTM: relative ||dL/dh_t||")
+    plt.plot(distance, lstm_c[::-1], label="LSTM: relative ||dL/dc_t||")
 
     plt.yscale("log")
-
-    plt.title(
-        f"Gradient Propagation Through Time (seq_len={seq_len})"
-    )
-
+    plt.xlabel("Steps before the final loss position")
+    plt.ylabel("Gradient norm relative to the final timestep")
+    plt.title(f"Gradient propagation through time, sequence length={seq_len}")
     plt.grid(True, alpha=0.3)
-
     plt.legend()
-
     plt.tight_layout()
-
-    plt.savefig(
-        save_path,
-        dpi=150,
-    )
-
-    print(f"Saved: {save_path}")
-
-    plt.show()
-
-
-# ============================================================
-# MULTIPLE LENGTHS
-# ============================================================
-
-def plot_multiple_lengths(
-    seq_lengths=(10, 20, 40, 80),
-):
-    fig, axes = plt.subplots(
-        2,
-        2,
-        figsize=(12, 10),
-    )
-
-    axes = axes.flatten()
-
-    for ax, seq_len in zip(
-        axes,
-        seq_lengths,
-    ):
-
-        rnn = measure_rnn_grad_norms_vs_timestep(
-            seq_len=seq_len
-        )
-
-        lstm_h, lstm_c = (
-            measure_lstm_grad_norms_vs_timestep(
-                seq_len=seq_len
-            )
-        )
-
-        steps = (
-            seq_len
-            - 1
-            - np.arange(seq_len)
-        )
-
-        ax.plot(
-            steps,
-            rnn,
-            label="RNN",
-        )
-
-        ax.plot(
-            steps,
-            lstm_h,
-            label="LSTM h",
-        )
-
-        ax.plot(
-            steps,
-            lstm_c,
-            label="LSTM c",
-        )
-
-        ax.set_yscale("log")
-        ax.set_title(
-            f"seq_len={seq_len}"
-        )
-        ax.grid(True, alpha=0.3)
-
-    axes[0].legend()
-
-    plt.tight_layout()
-
-    plt.savefig(
-        "outputs/all_lengths.png",
-        dpi=150,
-    )
-
+    plt.savefig(save_path, dpi=150)
+    print(f"saved plot to {save_path}")
     plt.show()
 
 
 if __name__ == "__main__":
-
-    os.makedirs(
-        "outputs",
-        exist_ok=True,
-    )
-
-    plot_gradient_comparison(
-        seq_len=40
-    )
-
-    plot_multiple_lengths(
-        seq_lengths=(10, 20, 40, 80)
-    )
+    os.makedirs("outputs", exist_ok=True)
+    plot_gradient_comparison(seq_len=40)
