@@ -69,10 +69,16 @@ class LSTMCellManual(nn.Module):
             6. c_t = f_t * c_prev + i_t * g_t
             7. h_t = o_t * torch.tanh(c_t)
         """
-        h_prev, c_prev = state
-
         # TODO(1): implement the gate computations described above
-        raise NotImplementedError("Implement the LSTM gates (see TODO(1) docstring)")
+        h_prev, c_prev = state
+        concat = torch.cat([h_prev, x_t], dim=-1) # shape (batch, input_size + hidden_size)
+        f_t = torch.sigmoid(self.W_f(concat))
+        i_t = torch.sigmoid(self.W_i(concat))
+        o_t = torch.sigmoid(self.W_o(concat))
+        g_t = torch.tanh(self.W_c(concat))
+        c_t = f_t * c_prev + i_t * g_t
+        h_t = o_t * torch.tanh(c_t)
+        # raise NotImplementedError("Implement the LSTM gates (see TODO(1) docstring)")
 
         gates = {"f": f_t, "i": i_t, "o": o_t, "g": g_t}
         return h_t, c_t, gates

@@ -30,6 +30,14 @@ def eval_delay(model, k, delay_len, batch_size, seed):
     with torch.no_grad():
         logits, _, _ = model(x)
     preds = logits.argmax(-1)
+    
+    print("INPUT")
+    print(x[0].tolist())
+    print("\nTARGET")
+    print(y[0].tolist())
+    print("\nPRED")
+    print(preds[0].tolist())
+
     mask = y != -100  # only the final k positions carry a loss/target
     correct = (preds[mask] == y[mask])
     return correct.float().mean().item()
@@ -38,8 +46,8 @@ def eval_delay(model, k, delay_len, batch_size, seed):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", default="outputs/rnn_copy.pt")
-    parser.add_argument("--k", type=int, default=8)
-    parser.add_argument("--delays", type=int, nargs="+", default=[3, 10, 30, 50])
+    parser.add_argument("--k", type=int, default=5)
+    parser.add_argument("--delays", type=int, nargs="+", default=[3, 5, 10])
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -48,9 +56,13 @@ def main():
         raise SystemExit(f"checkpoint not found: {args.ckpt}")
 
     model = build_model("rnn", VOCAB_SIZE).eval()
-    model.load_state_dict(torch.load(args.ckpt, map_location="cpu"))
+    model.load_state_dict(torch.load(args.ckpt, map_location="cuda"))
 
-    print(f"model: rnn  |  k={args.k}  |  ckpt: {args.ckpt}  |  chance = {1/args.k:.1%}")
+    NUM_DIGITS = 8
+    print(
+        f"model: rnn  |  k={args.k}  |  "
+        f"ckpt: {args.ckpt}  |  chance = {1/NUM_DIGITS:.1%}"
+    )
     print(f"{'delay_len':>10}  {'token acc':>12}  {'seq_len':>8}")
     for delay_len in args.delays:
         seq_len = args.k + delay_len + 1 + args.k
