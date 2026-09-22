@@ -10,7 +10,12 @@ Examples:
     python rnn_validation/validate_copy.py \
         --model lstm \
         --ckpt outputs/lstm_copy_k5_delay4_seed42.pt \
-        --k 5 --delays 4 8 16
+        --k 5 --delays 4 8 16 --show_example
+
+    python rnn_validation/validate_copy.py \
+    --model gru \
+    --ckpt outputs/gru_copy_k5_delay4_seed42.pt \
+    --k 5 --delays 4 8 16 --show_example
 """
 
 import argparse
